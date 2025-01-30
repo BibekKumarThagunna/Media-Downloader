@@ -2,10 +2,9 @@ import streamlit as st
 import requests
 import yt_dlp
 import os
+import json
 from urllib.parse import urlparse
 from io import BytesIO
-import instaloader
-from urllib.parse import urlencode
 
 # Function to get video details before downloading
 def get_video_info(link):
@@ -15,10 +14,13 @@ def get_video_info(link):
         'format': 'bestvideo+bestaudio/best'
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(link, download=False)
-        file_size = info_dict.get('filesize_approx', None)
-        title = info_dict.get('title', 'video')
-        return file_size, title
+        try:
+            info_dict = ydl.extract_info(link, download=False)
+            file_size = info_dict.get('filesize_approx', None)
+            title = info_dict.get('title', 'video')
+            return file_size, title
+        except Exception as e:
+            return None, None
 
 # Function to handle Google Drive direct download link
 def get_drive_download_link(link):
@@ -26,28 +28,39 @@ def get_drive_download_link(link):
     download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
     return download_url
 
-# Function to download Instagram post or reel (image/video)
-def download_instagram_content(link):
-    loader = instaloader.Instaloader()
+# Function to download TikTok videos
+def download_tiktok(link):
     try:
-        post = loader.get_post(link)
-        file_name = post.shortcode + '.' + post.url.split('.')[-1]
-        st.write(f"📦 File Size: **{post.video_height * post.video_width / 1048576:.2f} MB**")
+        # Use snaptik alternative API
+        api_url = f"https://www.tikwm.com/api/?url={link}"
+        response = requests.get(api_url)
 
-        response = requests.get(post.url, stream=True)
-        file_data = BytesIO(response.content)
+        if response.status_code == 200:
+            data = json.loads(response.text)
+            video_url = data["data"]["play"]
+            file_name = "tiktok_video.mp4"
 
-        st.download_button(
-            label="📥 Download Instagram Content",
-            data=file_data,
-            file_name=file_name,
-            mime="application/octet-stream"
-        )
+            st.write("📥 Fetching TikTok video...")
+            video_response = requests.get(video_url, stream=True)
+
+            if video_response.status_code == 200:
+                file_data = BytesIO(video_response.content)
+                st.download_button(
+                    label="📥 Download TikTok Video",
+                    data=file_data,
+                    file_name=file_name,
+                    mime="video/mp4"
+                )
+            else:
+                st.error("❌ Failed to fetch TikTok video.")
+
+        else:
+            st.error("❌ Unable to fetch TikTok video. Try another link.")
 
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
 
-# Function to handle download from different websites
+# Function to download from different websites
 def stream_download(link):
     try:
         # Handle Google Drive link
@@ -69,7 +82,12 @@ def stream_download(link):
                 st.error("❌ Failed to retrieve the file from Google Drive.")
             return
 
-        # Handle YouTube, YouTube Shorts, Twitter, Facebook, Instagram links
+        # Handle TikTok links separately
+        if "tiktok.com" in link:
+            download_tiktok(link)
+            return
+
+        # Handle YouTube, Facebook, Instagram, Twitter
         if any(domain in link for domain in ['youtube.com', 'youtu.be', 'twitter.com', 'facebook.com', 'instagram.com']):
             file_size, title = get_video_info(link)
 
@@ -130,7 +148,7 @@ def main():
 
     with st.expander("📌 Features"):
         st.write("""
-            - ✅ **Download media from YouTube, Instagram, Facebook, Google Drive, Twitter, and many other websites**.
+            - ✅ **Download media from YouTube, Instagram, Facebook, Google Drive, Twitter, TikTok, and many other websites**.
             - ✅ Supports **video, image, and other types of files**.
             - ✅ Provides **file size and download progress** before downloading.
         """)
