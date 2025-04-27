@@ -2,7 +2,7 @@
 import streamlit as st
 import requests
 import yt_dlp
-import instaloader # Added instaloader
+import instaloader
 import os
 import json
 from urllib.parse import urlparse, unquote
@@ -10,7 +10,7 @@ from io import BytesIO
 import tempfile
 import re
 import logging
-import time # For potential delays
+import time
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,7 +24,6 @@ def sanitize_filename(filename):
     sanitized = sanitized.strip().strip('.')
     if not sanitized:
         sanitized = "downloaded_file"
-    # Limit length (common filesystem limit is 255, be conservative)
     max_len = 150
     if len(sanitized) > max_len:
          name, ext = os.path.splitext(sanitized)
@@ -34,9 +33,7 @@ def sanitize_filename(filename):
 def display_download_button(file_data_bytes, filename, mime_type, status_placeholder):
      """Displays the download button and success message."""
      file_size_mb = len(file_data_bytes) / (1024 * 1024)
-     # Ensure the placeholder is cleared before showing the button
-     status_placeholder.empty()
-     # Use columns to place button nicely if desired, or just place directly
+     status_placeholder.empty() # Clear any previous status
      button_placeholder = st.empty()
      with button_placeholder:
           st.download_button(
@@ -48,8 +45,8 @@ def display_download_button(file_data_bytes, filename, mime_type, status_placeho
      st.success(f"✅ Download Ready: {filename}")
 
 
-# --- Instagram Downloader (Uses Instaloader) ---
-
+# --- Instagram Downloader ---
+# ... (Keep the download_instagram function exactly as before) ...
 def download_instagram(link, status_placeholder):
      """Attempts to download a public Instagram post/reel using Instaloader."""
      logging.info(f"Attempting Instagram download for: {link}")
@@ -69,7 +66,6 @@ def download_instagram(link, status_placeholder):
                compress_json=False, post_metadata_txt_pattern='', max_connection_attempts=3,
                request_timeout=15
           )
-          # No login attempt - public only
 
           status_placeholder.info(f"🔎 Fetching Instagram post: {shortcode}...")
           post = instaloader.Post.from_shortcode(L.context, shortcode)
@@ -92,7 +88,7 @@ def download_instagram(link, status_placeholder):
           response = requests.get(target_url, stream=True, timeout=45)
           response.raise_for_status()
 
-          file_data = BytesIO(response.content) # Read into memory
+          file_data = BytesIO(response.content)
           mime_type = "video/mp4" if is_video else "image/jpeg"
           logging.info(f"Instagram media fetched. Type: {'Video' if is_video else 'Image'}. Filename: {filename}")
 
@@ -132,18 +128,14 @@ def download_instagram(link, status_placeholder):
 def get_video_info_ydl(link):
     """Gets video info using yt-dlp WITHOUT downloading."""
     logging.info(f"Fetching info for: {link}")
-    # Define cookie file path (relative to script)
-    # IMPORTANT: Ensure cookies.txt is in the same directory or adjust path
-    cookie_file_path = 'cookies.txt'
+    cookie_file_path = 'cookies.txt' # Using cookies if available
     ydl_opts = {
         'quiet': True, 'noplaylist': True, 'format': 'bv*+ba/b',
         'getfilename': True, 'skip_download': True,
-        # --- ADD COOKIE FILE FOR INFO CHECK ---
         'cookiefile': cookie_file_path if os.path.exists(cookie_file_path) else None,
-        # ------------------------------------
     }
     if not ydl_opts['cookiefile']:
-         logging.warning("cookies.txt not found for get_video_info_ydl. Authentication may fail.")
+         logging.warning("cookies.txt not found for get_video_info_ydl.")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -171,60 +163,43 @@ def get_video_info_ydl(link):
         return None, "Error fetching info"
 
 
-def download_with_ydl(link, filename_hint, status_placeholder):
+def download_with_ydl(link, filename_hint): # Removed status_placeholder argument
     """Downloads using yt-dlp to a temporary file and returns bytes and final filename."""
     logging.info(f"Starting yt-dlp download for: {link}")
-    status_placeholder.info("⚙️ Initializing yt-dlp...")
-
-    # Define the progress hook function
-    def _progress_hook(d):
-        if d['status'] == 'downloading':
-            percent_str = d.get('_percent_str', '...?%').strip()
-            percent_val = percent_str.replace('%', '').strip()
-            if '?' in percent_val: percent_val = '...'
-            status_placeholder.info(f"⏳ Preparing Download: {percent_val}%")
-        elif d['status'] == 'finished':
-            status_placeholder.info("✅ Download complete, processing file...")
-        elif d['status'] == 'error':
-             status_placeholder.error("❌ Error during download process.")
+    # No status placeholder needed here anymore
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         base_name = sanitize_filename(os.path.splitext(filename_hint)[0])
         outtmpl = os.path.join(tmp_dir, f"{base_name}.%(ext)s")
 
-        # Define cookie file path (relative to script)
-        # IMPORTANT: Ensure cookies.txt is in the same directory or adjust path
         cookie_file_path = 'cookies.txt'
 
+        # --- MODIFIED ydl_opts: REMOVED hooks ---
         ydl_opts = {
             'format': 'bv*+ba/b',
             'merge_output_format': 'mp4',
             'outtmpl': outtmpl,
-            'quiet': True,
+            'quiet': True,       # Suppress yt-dlp console output
             'verbose': False,
-            'noprogress': True,
+            'noprogress': True,  # Disable yt-dlp's own progress bar
             'noplaylist': True,
-            # --- ADD COOKIE FILE PATH HERE ---
-            # Use cookies only if the file exists
             'cookiefile': cookie_file_path if os.path.exists(cookie_file_path) else None,
-            # ---------------------------------
-            'progress_hooks': [_progress_hook],
-            'postprocessor_hooks': [lambda d: status_placeholder.info(f"⚙️ Merging formats...") if d['status'] == 'started' and d['postprocessor'] == 'Merger' else None],
+            # 'progress_hooks': [], # REMOVED
+            # 'postprocessor_hooks': [], # REMOVED
         }
+        # -----------------------------------------
 
-        # Log a warning if cookies are expected but not found
         if not ydl_opts['cookiefile']:
              logging.warning("cookies.txt not found. Downloads requiring authentication will likely fail.")
-             # You might want to inform the user in the UI as well if needed:
-             # status_placeholder.warning("Cookie file not found. Authentication may fail.")
 
         downloaded_file_path = None
         final_filename = filename_hint
 
         try:
+            # The actual download happens within the 'with ydl:' block
+            # No explicit status update needed here, spinner handles it outside
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                status_placeholder.info(f"⬇️ Starting download: {filename_hint}...")
-                ydl.download([link])
+                ydl.download([link]) # This blocks until download finishes
 
                 files_in_tmp = os.listdir(tmp_dir)
                 if not files_in_tmp:
@@ -235,15 +210,15 @@ def download_with_ydl(link, filename_hint, status_placeholder):
                 final_filename = files_in_tmp[0]
                 logging.info(f"File downloaded to: {downloaded_file_path}")
 
-                status_placeholder.info(f"💾 Reading file: {final_filename}...")
-                # WARNING: Memory limit issue here
+                # Read file content AFTER download completes
+                logging.info(f"Reading file: {final_filename}...")
                 with open(downloaded_file_path, "rb") as f:
                     file_data = f.read()
                 logging.info(f"Read {len(file_data)} bytes.")
 
-                status_placeholder.empty() # Clear status before returning
                 return file_data, final_filename
 
+        # Keep previous detailed error handling
         except yt_dlp.utils.DownloadError as e:
             error_str = str(e)
             logging.error(f"yt-dlp DownloadError for {link}: {error_str}", exc_info=True)
@@ -256,12 +231,10 @@ def download_with_ydl(link, filename_hint, status_placeholder):
                     "- Platform changes blocking yt-dlp (ensure it's up-to-date via requirements.txt).\n"
                     "- Regional blocks."
                  )
-                 # Add note if cookies were used but failed
                  if ydl_opts.get('cookiefile'):
                       error_message += "\n- Authentication via cookies failed or was insufficient."
                  return None, error_message
             elif 'Unsupported URL' in error_str: return None, f"Error: Unsupported URL for yt-dlp."
-            # Check specifically for authentication required errors
             elif 'confirm your age' in error_str.lower() or 'login required' in error_str.lower() or 'video is private' in error_str.lower():
                  if ydl_opts.get('cookiefile'):
                       return None, "Error: Login/Age check failed even with cookies. Cookies might be expired or invalid."
@@ -274,8 +247,9 @@ def download_with_ydl(link, filename_hint, status_placeholder):
         finally:
              logging.info(f"Temporary directory {tmp_dir} will be cleaned up.")
 
+
 # --- Other Downloaders (TikTok, Drive, Generic - unchanged logic) ---
-# ... (Keep the functions get_drive_download_link, download_tiktok, download_generic exactly as they were in the previous version) ...
+# ... (Keep the functions get_drive_download_link, download_tiktok, download_generic exactly as they were) ...
 def get_drive_download_link(link):
     """Attempts to create a direct download link for Google Drive."""
     try:
@@ -304,11 +278,12 @@ def download_tiktok(link, status_placeholder):
             author = data["data"].get("author", {}).get("unique_id", "user")
             file_name = sanitize_filename(f"{author}_{title}.mp4")
 
-            status_placeholder.info(f"⬇️ Fetching TikTok video: {file_name}...")
-            video_response = requests.get(video_url, stream=True, timeout=30)
-            video_response.raise_for_status()
+            # Use spinner for the actual download part
+            with st.spinner(f"⬇️ Fetching TikTok video: {file_name}..."):
+                video_response = requests.get(video_url, stream=True, timeout=30)
+                video_response.raise_for_status()
+                file_data = BytesIO(video_response.content) # Read into memory
 
-            file_data = BytesIO(video_response.content) # Read into memory
             logging.info(f"TikTok video fetched: {file_name}")
             display_download_button(file_data.getvalue(), file_name, "video/mp4", status_placeholder)
             return True
@@ -339,13 +314,16 @@ def download_generic(link, status_placeholder, source_response=None):
     logging.info(f"Attempting generic download for: {link}")
     status_placeholder.info("🌐 Attempting direct file download...")
     try:
-        if source_response:
-             response = source_response
-             response.raise_for_status()
+        if not source_response:
+             # Only show spinner if making a new request
+             with st.spinner("Connecting to server..."):
+                  response = requests.get(link, stream=True, timeout=15, allow_redirects=True)
+                  response.raise_for_status()
         else:
-             response = requests.get(link, stream=True, timeout=15, allow_redirects=True)
-             response.raise_for_status()
+            response = source_response # Reuse response (e.g., from Drive check)
+            response.raise_for_status()
 
+        # Filename detection logic (keep as is)
         file_name = "downloaded_file"
         content_disposition = response.headers.get('content-disposition')
         if content_disposition:
@@ -362,8 +340,10 @@ def download_generic(link, status_placeholder, source_response=None):
 
         content_type = response.headers.get('content-type', 'application/octet-stream').split(';')[0]
 
-        status_placeholder.info(f"⬇️ Downloading '{file_name}'...")
-        file_data = BytesIO(response.content) # Read into memory
+        # Use spinner for the actual download reading part
+        with st.spinner(f"⬇️ Downloading '{file_name}'..."):
+             file_data = BytesIO(response.content) # Read into memory
+
         logging.info(f"Generic download fetched: {file_name}")
         display_download_button(file_data.getvalue(), file_name, content_type, status_placeholder)
         return True
@@ -378,13 +358,13 @@ def download_generic(link, status_placeholder, source_response=None):
         status_placeholder.empty()
         return False
 
-# --- Main Download Logic (Router - unchanged) ---
+
+# --- Main Download Logic (Router) ---
 
 def route_download(link, status_placeholder):
     """Determines the download method based on the link."""
     if not link or not link.strip().startswith(('http://', 'https://')):
-         st.error("❌ Invalid URL. Please enter a valid link starting with http:// or https://")
-         status_placeholder.empty()
+         status_placeholder.error("❌ Invalid URL. Please enter a valid link starting with http:// or https://")
          return
 
     parsed_url = urlparse(link)
@@ -392,36 +372,35 @@ def route_download(link, status_placeholder):
 
     # --- Routing Logic ---
     if "drive.google.com" in domain:
-        status_placeholder.info("🚗 Handling Google Drive link...")
-        download_url = get_drive_download_link(link)
-        if not download_url:
-            st.error("❌ Could not parse Google Drive link format.")
-            status_placeholder.empty()
-            return
-        try:
-             response = requests.get(download_url, stream=True, timeout=20)
-             response.raise_for_status()
-             if 'text/html' in response.headers.get('Content-Type', '').lower():
-                  st.error("❌ Google Drive link requires confirmation/login or isn't shared correctly.")
-                  status_placeholder.empty()
-                  return
-             status_placeholder.info("Google Drive link seems direct...")
-             download_generic(download_url, status_placeholder, source_response=response)
-        except requests.exceptions.RequestException as e:
-             st.error(f"❌ Failed to retrieve from Google Drive: Network Error ({e})")
-             status_placeholder.empty()
-        except Exception as e:
-             st.error(f"❌ An unexpected error occurred with Google Drive: {str(e)}")
-             status_placeholder.empty()
+        # Wrap Drive logic in spinner
+        with st.spinner("🚗 Handling Google Drive link..."):
+            download_url = get_drive_download_link(link)
+            if not download_url:
+                status_placeholder.error("❌ Could not parse Google Drive link format.")
+                return
+            try:
+                 response = requests.get(download_url, stream=True, timeout=20)
+                 response.raise_for_status()
+                 if 'text/html' in response.headers.get('Content-Type', '').lower():
+                      status_placeholder.error("❌ Google Drive link requires confirmation/login or isn't shared correctly.")
+                      return
+                 # If okay, proceed with generic download
+                 status_placeholder.info("Google Drive link seems direct...") # Update status before next step
+                 download_generic(download_url, status_placeholder, source_response=response) # Spinner inside generic
+            except requests.exceptions.RequestException as e:
+                 status_placeholder.error(f"❌ Failed to retrieve from Google Drive: Network Error ({e})")
+            except Exception as e:
+                 status_placeholder.error(f"❌ An unexpected error occurred with Google Drive: {str(e)}")
 
     elif "instagram.com" in domain:
-        download_instagram(link, status_placeholder)
+        # Spinner can be added here or kept inside download_instagram if preferred
+        download_instagram(link, status_placeholder) # Spinner logic might be inside already
 
     elif "tiktok.com" in domain:
-        download_tiktok(link, status_placeholder)
+        download_tiktok(link, status_placeholder) # Spinner logic inside
 
     else:
-        # Check if likely yt-dlp target (keep list as is)
+        # Check if likely yt-dlp target
         ydl_domains = [
             '.youtube.com', 'youtu.be', 'facebook.com', 'fb.watch', 'twitter.com',
             'vimeo.com', 'dailymotion.com', 'soundcloud.com', 'twitch.tv', 'bandcamp.com',
@@ -430,20 +409,28 @@ def route_download(link, status_placeholder):
         is_ydl_target = any(domain.endswith(d) for d in ydl_domains) or domain.startswith('youtube.') or domain.startswith('youtube.com') or domain.startswith('youtu.be')
 
         if is_ydl_target:
-            status_placeholder.info("🔎 Analyzing link with yt-dlp...")
-            file_size, filename_or_error = get_video_info_ydl(link) # Uses cookies if available
+            # Show spinner for info fetching stage
+            with st.spinner("🔎 Analyzing link with yt-dlp..."):
+                file_size, filename_or_error = get_video_info_ydl(link)
 
+            # Check analysis result
             if filename_or_error is None or filename_or_error in ["Unsupported URL", "Access Denied (403)", "Login Required", "yt-dlp Error", "Error fetching info"]:
                  error_msg = filename_or_error or "Unknown analysis error"
-                 st.error(f"❌ Analysis failed: {error_msg}")
-                 status_placeholder.empty()
-                 return
+                 status_placeholder.error(f"❌ Analysis failed: {error_msg}")
+                 return # Stop if analysis failed
 
+            # --- MODIFIED: Use st.spinner for the download ---
             size_info = f"~{round(file_size / (1024 * 1024), 2)} MB" if file_size else "Unknown Size"
-            status_placeholder.info(f"ℹ️ Media detected: '{os.path.splitext(filename_or_error)[0]}', Size: **{size_info}**")
-            # Download with yt-dlp (uses cookies if available)
-            file_data, message = download_with_ydl(link, filename_or_error, status_placeholder)
+            spinner_text = f"⏳ Downloading '{os.path.splitext(filename_or_error)[0]}' ({size_info})... This may take time."
 
+            file_data = None
+            message = None
+            with st.spinner(spinner_text):
+                # Call download_with_ydl which now has no status_placeholder arg
+                file_data, message = download_with_ydl(link, filename_or_error)
+            # -------------------------------------------------
+
+            # Process result after spinner finishes
             if file_data:
                  mime_type = "application/octet-stream"
                  if '.' in message: ext = message.split('.')[-1].lower()
@@ -455,15 +442,17 @@ def route_download(link, status_placeholder):
                  elif ext == 'jpg' or ext == 'jpeg': mime_type = 'image/jpeg'
                  elif ext == 'png': mime_type = 'image/png'
                  elif ext == 'webp': mime_type = 'image/webp'
+                 # Display download button in the main placeholder area
                  display_download_button(file_data, message, mime_type, status_placeholder)
             else:
-                 st.error(f"❌ Download Failed: {message}")
-                 status_placeholder.empty()
+                 # Show error message in the main placeholder area
+                 status_placeholder.error(f"❌ Download Failed: {message}")
 
         else:
-             # Generic Fallback
+             # Generic Fallback (spinner logic is inside download_generic)
              status_placeholder.warning("Domain not specifically handled, attempting generic download...")
              download_generic(link, status_placeholder)
+
 
 # --- Streamlit UI (unchanged) ---
 def main():
@@ -478,17 +467,17 @@ def main():
         st.write("") # Spacer
         download_button = st.button("⬇️ Get Media", key="download_button", use_container_width=True)
 
-    status_placeholder = st.container() # Use a container to manage status updates
+    status_placeholder = st.container() # Use a container to manage status updates/button
 
     if download_button:
         status_placeholder.empty() # Clear previous status/button
-        msg_container = status_placeholder.container()
+        # No spinner here, it's handled within route_download for specific actions
 
         if link and link.strip():
-            with st.spinner("Processing link..."):
-                 route_download(link.strip(), msg_container) # Pass container for messages
+            # Pass the placeholder container for final results/errors
+            route_download(link.strip(), status_placeholder)
         else:
-            msg_container.error("❌ Please provide a valid URL.")
+            status_placeholder.error("❌ Please provide a valid URL.")
 
     # Expander (keep updated info)
     with st.expander("📌 Supported Sites & Info", expanded=False):
