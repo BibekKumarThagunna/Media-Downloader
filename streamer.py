@@ -51,80 +51,154 @@ def download_instagram(link, status_placeholder):
     logging.info(f"Attempting Instagram download for: {link}")
     status_placeholder.info("📸 Connecting to Instagram (public posts only)...")
 
-    match = re.search(r"(?:p|reel|tv)/([\w-]+)", link)
+    # --- UPDATED REGEX ---
+    # More robust regex to find shortcode preceded by /p/, /reel/, /tv/
+    # Handles cases with or without trailing slashes and query parameters
+    match = re.search(r"/(?:p|reel|tv)/([\w-]+)", link)
+    # --- END UPDATED REGEX ---
+
     if not match:
-        st.error("❌ Invalid Instagram post/reel URL format.")
+        st.error("❌ Invalid Instagram URL format. Could not find post/reel ID.")
+        logging.warning(f"Failed to extract shortcode from Instagram URL: {link}")
         status_placeholder.empty()
         return False
     shortcode = match.group(1)
+    logging.info(f"Extracted shortcode: {shortcode}")
 
     try:
         L = instaloader.Instaloader(
             download_pictures=True, download_videos=True, download_video_thumbnails=False,
             download_geotags=False, download_comments=False, save_metadata=False,
             compress_json=False, post_metadata_txt_pattern='', max_connection_attempts=3,
-            request_timeout=15
+            request_timeout=20 # Slightly increased timeout
         )
+        # Optional: Configure user agent if needed, though default usually works
+        # L.context.user_agent = "Mozilla/5.0 ..."
 
-        status_placeholder.info(f"🔎 Fetching Instagram post: {shortcode}...")
+        status_placeholder.info(f"🔎 Fetching Instagram post metadata for: {shortcode}...")
         post = instaloader.Post.from_shortcode(L.context, shortcode)
+        logging.info(f"Successfully fetched metadata for shortcode: {shortcode}")
 
         is_video = post.is_video
-        target_url = post.video_url if is_video else post.url
+        # Prioritize video_url if available, otherwise fallback to display_url/post.url
+        target_url = None
+        if is_video and post.video_url:
+            target_url = post.video_url
+            logging.info("Using post.video_url")
+        elif not is_video and post.url: # post.url usually points to the image for photos
+             target_url = post.url
+             logging.info("Using post.url for image")
+        else:
+            # Fallback/alternative if primary URLs are missing (less common)
+            logging.warning(f"Primary URL missing for {shortcode}. Trying display_url.")
+            target_url = post.display_url # Often works for single images/videos
 
         if not target_url:
-            st.error("❌ Could not find media URL in the Instagram post.")
+            st.error("❌ Could not find a downloadable media URL in the Instagram post metadata.")
+            logging.error(f"Failed to find target_url for shortcode: {shortcode}")
             status_placeholder.empty()
             return False
 
         owner = post.owner_username or "instagram"
-        timestamp = post.date_utc.strftime("%Y%m%d")
+        # Use caption as part of filename if available, otherwise use timestamp
+        caption_part = re.sub(r'\W+', '_', post.caption[:30]) if post.caption else post.date_utc.strftime("%Y%m%d")
         ext = ".mp4" if is_video else ".jpg"
-        filename = sanitize_filename(f"{owner}_{shortcode}_{timestamp}{ext}")
+        filename = sanitize_filename(f"{owner}_{shortcode}_{caption_part}{ext}")
 
-        status_placeholder.info(f"⬇️ Fetching Instagram {'video' if is_video else 'image'}: {filename}...")
+        status_placeholder.info(f"⬇️ Fetching Instagram {'video' if is_video else 'image'} ({filename})...")
 
-        response = requests.get(target_url, stream=True, timeout=45)
-        response.raise_for_status()
+        # Use Instaloader's download context if direct requests fail or for consistency
+        # response = requests.get(target_url, stream=True, timeout=45)
+        # response.raise_for_status()
+        # file_data = BytesIO(response.content)
 
-        file_data = BytesIO(response.content)
-        mime_type = "video/mp4" if is_video else "image/jpeg"
-        logging.info(f"Instagram media fetched. Type: {'Video' if is_video else 'Image'}. Filename: {filename}")
+        # Alternative: Use Instaloader's download method (might handle some edge cases better)
+        temp_dl_dir = tempfile.TemporaryDirectory()
+        try:
+            logging.info(f"Attempting download via L.download_post for {shortcode} into {temp_dl_dir.name}")
+            # Download only the post itself, not profile pic etc.
+            L.download_post(post, target=temp_dl_dir.name)
 
-        display_download_button(file_data.getvalue(), filename, mime_type, status_placeholder)
-        return True
+            # Find the downloaded file (usually .jpg or .mp4)
+            downloaded_media = None
+            for fname in os.listdir(temp_dl_dir.name):
+                if fname.endswith('.mp4') or fname.endswith('.jpg'):
+                     downloaded_media = os.path.join(temp_dl_dir.name, fname)
+                     # Correct filename if needed (Instaloader uses its own naming)
+                     if os.path.splitext(filename)[1] != os.path.splitext(fname)[1]:
+                         filename = sanitize_filename(f"{os.path.splitext(filename)[0]}{os.path.splitext(fname)[1]}")
+                     logging.info(f"Found downloaded media: {fname}, using final filename: {filename}")
+                     break
+
+            if not downloaded_media:
+                raise FileNotFoundError("Instaloader downloaded post, but media file not found in temp dir.")
+
+            with open(downloaded_media, "rb") as f:
+                 file_data_bytes = f.read()
+
+            mime_type = "video/mp4" if is_video else "image/jpeg"
+            logging.info(f"Instagram media fetched via L.download_post. Type: {'Video' if is_video else 'Image'}. Filename: {filename}")
+            display_download_button(file_data_bytes, filename, mime_type, status_placeholder)
+            temp_dl_dir.cleanup() # Explicit cleanup
+            return True
+
+        except Exception as dl_err:
+             logging.error(f"L.download_post failed for {shortcode}: {dl_err}", exc_info=True)
+             temp_dl_dir.cleanup() # Ensure cleanup on error
+             # Fallback to requests if L.download_post fails
+             logging.info(f"L.download_post failed, falling back to requests.get for {target_url}")
+             response = requests.get(target_url, stream=True, timeout=60) # Increased timeout for direct download
+             response.raise_for_status()
+             file_data = BytesIO(response.content)
+             mime_type = "video/mp4" if is_video else "image/jpeg"
+             logging.info(f"Instagram media fetched via requests fallback. Type: {'Video' if is_video else 'Image'}. Filename: {filename}")
+             display_download_button(file_data.getvalue(), filename, mime_type, status_placeholder)
+             return True
+
 
     except instaloader.exceptions.PrivateProfileNotFollowedException:
-        st.error("❌ Failed: Profile is private or requires login.")
+        st.error("❌ Failed: Profile is private or you don't follow them (login might be required via cookies).")
+        logging.warning(f"PrivateProfileNotFollowedException for {shortcode}")
         status_placeholder.empty()
         return False
     except instaloader.exceptions.LoginRequiredException:
-        st.error("❌ Failed: Login required to access this content.")
+        st.error("❌ Failed: Login required to access this content (try adding cookies.txt).")
+        logging.warning(f"LoginRequiredException for {shortcode}")
         status_placeholder.empty()
         return False
-    # ---------- CORRECTED LINE BELOW ----------
     except instaloader.exceptions.QueryReturnedNotFoundException:
-        st.error("❌ Failed: Instagram post not found (404).")
+        st.error("❌ Failed: Instagram post not found (404). It might be deleted or the link is wrong.")
+        logging.warning(f"QueryReturnedNotFoundException for {shortcode}")
         status_placeholder.empty()
         return False
-    # ---------- END CORRECTION ----------
+    # --- ADDED Specific Exception ---
+    except instaloader.exceptions.BadResponseException as e:
+         st.error(f"❌ Failed: Instagram returned a bad response (maybe temporary issue or changed API). Details: {e}")
+         logging.error(f"BadResponseException for {shortcode}: {e}", exc_info=True)
+         status_placeholder.empty()
+         return False
     except instaloader.exceptions.ConnectionException as e:
         logging.error(f"Instaloader Connection Error for {link}: {e}", exc_info=True)
-        st.error(f"❌ Connection Error with Instagram: {e}")
+        st.error(f"❌ Connection Error reaching Instagram: {e}")
         status_placeholder.empty()
         return False
     except requests.exceptions.RequestException as e:
-        logging.error(f"Network Error downloading Instagram media from {target_url}: {e}", exc_info=True)
+        logging.error(f"Network Error during Instagram download fallback for {shortcode}: {e}", exc_info=True)
         st.error(f"❌ Network Error downloading the media file: {e}")
         status_placeholder.empty()
         return False
     except Exception as e:
-        logging.error(f"General Error during Instagram download for {link}: {e}", exc_info=True)
-        st.error(f"❌ An unexpected error occurred with Instagram: {str(e)}")
+        # Catch-all for other unexpected errors during metadata fetch or processing
+        error_message = f"❌ An unexpected error occurred with Instagram: {str(e)}"
+        # Check if it's the metadata fetch error seen before
+        if "Fetching Post metadata failed" in str(e):
+             error_message += " (This often happens if the post needs login, is unavailable, or due to Instagram changes)."
+        logging.error(f"General Error during Instagram download for {shortcode} / {link}: {e}", exc_info=True)
+        st.error(error_message)
         status_placeholder.empty()
         return False
 
-# --- yt-dlp Functions ---
+# --- yt-dlp Functions (unchanged) ---
 
 def get_video_info_ydl(link):
     """Gets video info using yt-dlp WITHOUT downloading."""
@@ -368,7 +442,7 @@ def route_download(link, status_placeholder):
         return
 
     parsed_url = urlparse(link)
-    domain = parsed_url.netloc.lower()
+    domain = parsed_url.netloc.lower().replace('www.', '') # Normalize domain
 
     # --- Routing Logic ---
     if "drive.google.com" in domain:
@@ -379,35 +453,42 @@ def route_download(link, status_placeholder):
                 status_placeholder.error("❌ Could not parse Google Drive link format.")
                 return
             try:
-                response = requests.get(download_url, stream=True, timeout=20)
-                response.raise_for_status()
-                if 'text/html' in response.headers.get('Content-Type', '').lower():
-                    status_placeholder.error("❌ Google Drive link requires confirmation/login or isn't shared correctly.")
-                    return
-                # If okay, proceed with generic download
-                status_placeholder.info("Google Drive link seems direct...") # Update status before next step
-                download_generic(download_url, status_placeholder, source_response=response) # Spinner inside generic
+                # Use HEAD request first to check for HTML/login page without downloading it
+                head_response = requests.head(download_url, timeout=10, allow_redirects=True)
+                head_response.raise_for_status()
+                if 'text/html' in head_response.headers.get('Content-Type', '').lower():
+                     status_placeholder.error("❌ Google Drive link leads to a webpage (requires confirmation/login or isn't shared correctly).")
+                     return
+
+                # If HEAD is okay, proceed with GET using generic download
+                status_placeholder.info("Google Drive link seems direct, attempting download...") # Update status before next step
+                # Pass the original link to generic, it will re-request
+                download_generic(download_url, status_placeholder) # Spinner inside generic
+
             except requests.exceptions.RequestException as e:
-                status_placeholder.error(f"❌ Failed to retrieve from Google Drive: Network Error ({e})")
+                status_placeholder.error(f"❌ Failed to check/retrieve from Google Drive: Network Error ({e})")
             except Exception as e:
                 status_placeholder.error(f"❌ An unexpected error occurred with Google Drive: {str(e)}")
 
     elif "instagram.com" in domain:
-        # Spinner can be added here or kept inside download_instagram if preferred
-        download_instagram(link, status_placeholder) # Spinner logic might be inside already
+        # Spinner is handled inside download_instagram
+        download_instagram(link, status_placeholder)
 
     elif "tiktok.com" in domain:
         download_tiktok(link, status_placeholder) # Spinner logic inside
 
     else:
         # Check if likely yt-dlp target
+        # Expanded list slightly
         ydl_domains = [
-            'youtube.com', 'youtu.be', 'facebook.com', 'fb.watch', 'twitter.com',
+            'youtube.com', 'youtu.be', 'facebook.com', 'fb.watch', 'twitter.com', 'x.com'
             'vimeo.com', 'dailymotion.com', 'soundcloud.com', 'twitch.tv', 'bandcamp.com',
-            'bilibili.com',
-            # Add variations if needed, e.g., 'm.youtube.com'
+            'bilibili.com', 'nicovideo.jp', 'vk.com', 'ok.ru',
         ]
-        is_ydl_target = any(d in domain for d in ydl_domains) or domain.startswith('youtube.com') or domain.startswith('youtu.be')
+        # Check if domain *is* or *ends with* one of the ydl_domains
+        # Also explicitly check for youtube variants
+        is_ydl_target = any(domain == d or domain.endswith('.' + d) for d in ydl_domains) or \
+                        domain.startswith('youtube.com') or domain.startswith('youtu.be') or domain == 'youtu.be'
 
         if is_ydl_target:
             # Show spinner for info fetching stage
@@ -417,8 +498,13 @@ def route_download(link, status_placeholder):
             # Check analysis result
             if filename_or_error is None or filename_or_error in ["Unsupported URL", "Access Denied (403)", "Login Required", "yt-dlp Error", "Error fetching info"]:
                 error_msg = filename_or_error or "Unknown analysis error"
-                status_placeholder.error(f"❌ Analysis failed: {error_msg}")
-                return # Stop if analysis failed
+                # Attempt generic download as a fallback for some errors like Unsupported URL
+                if filename_or_error == "Unsupported URL":
+                    status_placeholder.warning(f"⚠️ yt-dlp doesn't support this URL directly ({error_msg}). Attempting generic download...")
+                    download_generic(link, status_placeholder)
+                else:
+                    status_placeholder.error(f"❌ Analysis failed: {error_msg}")
+                    return # Stop if analysis failed critically
 
             # --- MODIFIED: Use st.spinner for the download ---
             size_info = f"~{round(file_size / (1024 * 1024), 2)} MB" if file_size else "Unknown Size"
@@ -426,32 +512,44 @@ def route_download(link, status_placeholder):
 
             file_data = None
             message = None
-            with st.spinner(spinner_text):
-                # Call download_with_ydl which now has no status_placeholder arg
-                file_data, message = download_with_ydl(link, filename_or_error)
-            # -------------------------------------------------
+            # Ensure filename_or_error is actually a filename before proceeding
+            if file_size is not None: # Check if info fetching was somewhat successful
+                with st.spinner(spinner_text):
+                    # Call download_with_ydl which now has no status_placeholder arg
+                    file_data, message = download_with_ydl(link, filename_or_error)
+                # -------------------------------------------------
 
-            # Process result after spinner finishes
-            if file_data:
-                mime_type = "application/octet-stream"
-                if '.' in message: ext = message.split('.')[-1].lower()
-                else: ext = ''
-                if ext == 'mp4': mime_type = 'video/mp4'
-                elif ext == 'mp3': mime_type = 'audio/mpeg'
-                elif ext == 'webm': mime_type = 'video/webm'
-                elif ext == 'mkv': mime_type = 'video/x-matroska'
-                elif ext == 'jpg' or ext == 'jpeg': mime_type = 'image/jpeg'
-                elif ext == 'png': mime_type = 'image/png'
-                elif ext == 'webp': mime_type = 'image/webp'
-                # Display download button in the main placeholder area
-                display_download_button(file_data, message, mime_type, status_placeholder)
-            else:
-                # Show error message in the main placeholder area
-                status_placeholder.error(f"❌ Download Failed: {message}")
+                # Process result after spinner finishes
+                if file_data:
+                    mime_type = "application/octet-stream"
+                    # Ensure message is treated as the filename here
+                    final_filename = message if message else filename_or_error
+                    if '.' in final_filename: ext = final_filename.split('.')[-1].lower()
+                    else: ext = ''
+
+                    # Basic MIME type mapping
+                    mime_map = {
+                        'mp4': 'video/mp4', 'mkv': 'video/x-matroska', 'webm': 'video/webm',
+                        'mov': 'video/quicktime', 'avi': 'video/x-msvideo',
+                        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'm4a': 'audio/mp4',
+                        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+                        'webp': 'image/webp', 'gif': 'image/gif',
+                    }
+                    mime_type = mime_map.get(ext, 'application/octet-stream')
+
+                    # Display download button in the main placeholder area
+                    display_download_button(file_data, final_filename, mime_type, status_placeholder)
+                else:
+                    # Show error message in the main placeholder area
+                    status_placeholder.error(f"❌ Download Failed via yt-dlp: {message}")
+            # If file_size was None but we didn't return earlier (e.g. Unsupported URL fallback failed)
+            elif not filename_or_error == "Unsupported URL": # Avoid double message if generic was already tried
+                 status_placeholder.error(f"❌ Download Failed: Could not get necessary info via yt-dlp ({filename_or_error}).")
+
 
         else:
             # Generic Fallback (spinner logic is inside download_generic)
-            status_placeholder.warning("Domain not specifically handled, attempting generic download...")
+            status_placeholder.warning("Domain not specifically handled by yt-dlp, attempting generic download...")
             download_generic(link, status_placeholder)
 
 
@@ -483,13 +581,14 @@ def main():
     # Expander (keep updated info)
     with st.expander("📌 Supported Sites & Info", expanded=False):
         st.markdown("""
-            * **Attempts to Support:** YouTube, Facebook, Twitter, Instagram (Public Posts/Reels), TikTok*, Google Drive*, Vimeo, Dailymotion, Soundcloud, Twitch Clips/VODs, Bandcamp, Bilibili, and many other sites via `yt-dlp`. (Cookie support added for authenticated downloads where needed).
+            * **Attempts to Support:** YouTube, Facebook, Twitter/X, Instagram (Public Posts/Reels), TikTok*, Google Drive*, Vimeo, Dailymotion, Soundcloud, Twitch Clips/VODs, Bandcamp, Bilibili, and many other sites via `yt-dlp`. (Cookie support added for authenticated downloads where needed).
             * **Generic Downloader:** Tries direct downloads for other file URLs.
             * **Features:** Shows estimated file size when available. Downloads directly to your browser.
             * **Important Notes:**
-                * `*`TikTok (uses external API) & Google Drive (direct links) support can be unreliable.
-                * **Login/Cookies:** This version attempts to use a `cookies.txt` file if present. This primarily helps with age/privacy restricted content. **Using cookies is a security risk if not managed carefully.** Login required for Instagram profiles/stories etc. will still fail.
-                * **Platform Blocking:** Sites like YouTube may still block downloads (e.g., 403 errors), even with cookies, due to IP limits etc.
+                * `*`TikTok (uses external API) & Google Drive (direct links) support can be unreliable. Check sharing permissions for Drive links.
+                * **Instagram:** Works best for public posts/reels. Stories/private content usually require login (via `cookies.txt`). Instagram frequently changes things, which can break downloads temporarily. Errors like "Fetching metadata failed" or "Bad Response" might indicate login requirements or temporary blocks.
+                * **Login/Cookies:** This version attempts to use a `cookies.txt` file if present in the app's root directory. This primarily helps with age/privacy restricted content on sites like YouTube. **Using cookies requires careful management.**
+                * **Platform Blocking:** Sites like YouTube/Instagram may still block downloads (e.g., 403 errors, rate limits), even with cookies.
                 * **Large Files:** Downloads might fail on the server due to memory limits (~1GB).
                 * **Cookie Expiration:** `cookies.txt` needs manual updates when cookies expire.
             """)
